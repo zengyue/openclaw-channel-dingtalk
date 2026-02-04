@@ -56,6 +56,18 @@ export const DingTalkConfigSchema = z.object({
     systemPrompt: z.string().optional(),
   })).optional(),
 
+  /** Enable webhook server for POST mode (in addition to Stream mode) */
+  webhookEnabled: z.boolean().optional().default(true),
+
+  /** Authorization token for webhook server */
+  webhookAuthToken: z.string().optional(),
+
+  /** Port for webhook server to listen on */
+  webhookPort: z.number().optional().default(20123),
+
+  /** Path for webhook endpoint */
+  webhookPath: z.string().optional(),
+
   /** Multi-account configuration */
   accounts: z.record(z.string(), z.unknown()).optional(),
 });

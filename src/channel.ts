@@ -4,11 +4,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import * as http from 'node:http';
 import type { OpenClawConfig } from 'openclaw/plugin-sdk';
 import { buildChannelConfigSchema } from 'openclaw/plugin-sdk';
 import { maskSensitiveData, cleanupOrphanedTempFiles, retryWithBackoff } from '../utils';
 import { getDingTalkRuntime } from './runtime';
 import { DingTalkConfigSchema } from './config-schema.js';
+import { createWebhookServer, closeWebhookServer } from './webhook';
 import type {
   DingTalkConfig,
   TokenInfo,
@@ -41,6 +43,9 @@ const aiCardInstances = new Map<string, AICardInstance>();
 // Target to active AI Card instance ID mapping (accountId:conversationId -> cardInstanceId)
 // Used to quickly lookup existing active cards for a target
 const activeCardsByTarget = new Map<string, string>();
+
+// Store latest DingTalk message data per accountId for webhook merging
+const latestMessageByAccount = new Map<string, DingTalkInboundMessage>();
 
 // Card cache TTL (1 hour)
 const CARD_CACHE_TTL = 60 * 60 * 1000; // 1 hour
@@ -1034,6 +1039,10 @@ export const dingtalkPlugin = {
             client.socketCallBackResponse(messageId, { success: true });
           }
           const data = JSON.parse(res.data) as DingTalkInboundMessage;
+          
+          // Record latest message data for this account
+          latestMessageByAccount.set(account.accountId, data);
+          
           await handleDingTalkMessage({
             cfg,
             accountId: account.accountId,
@@ -1053,13 +1062,68 @@ export const dingtalkPlugin = {
       if (ctx.log?.info) {
         ctx.log.info(`[${account.accountId}] DingTalk Stream client connected`);
       }
+
+      // Setup HTTP webhook server for POST mode (optional)
+      let httpServer: http.Server | null = null;
+
+      if (config.webhookEnabled !== false) {
+        try {
+          const webhookResult = await createWebhookServer({
+            config,
+            cfg,
+            log: ctx.log,
+            onMessage: async (webhookData) => {
+              // Get the latest stored message data for this account
+              const storedData = latestMessageByAccount.get(account.accountId);
+              ctx.log?.debug?.(`webhooks storedData=${JSON.stringify(storedData)}`);
+              if (!storedData || (storedData.sessionWebhookExpiredTime &&storedData.sessionWebhookExpiredTime < new Date().getTime())) {
+                return;
+              }
+              
+              // Merge webhook data with stored data
+              const data = {
+                // Start with stored data as base
+                ...storedData,
+                // Override with webhook-provided fields
+                msgId: randomUUID(),
+                msgtype: 'text',
+                createAt: new Date().getTime(),
+                text: {
+                  content: webhookData.content,
+                },
+                content: undefined,
+              };
+              
+              
+              await handleDingTalkMessage({
+                cfg,
+                accountId: account.accountId,
+                data,
+                sessionWebhook: data.sessionWebhook,
+                log: ctx.log,
+                dingtalkConfig: config,
+              });
+            },
+          });
+          httpServer = webhookResult.server;
+        } catch (error: unknown) {
+          if (ctx.log?.warn) {
+            ctx.log.warn(
+              `[${account.accountId}] Failed to start webhook server: ${String(error)}`
+            );
+          }
+          // Continue anyway - Stream mode will still work
+          httpServer = null;
+        }
+      }
+
       let stopped = false;
       if (abortSignal) {
         abortSignal.addEventListener('abort', () => {
           if (stopped) return;
           stopped = true;
           if (ctx.log?.info) {
-            ctx.log.info(`[${account.accountId}] Stopping DingTalk Stream client...`);
+            ctx.log.info(`[${account.accountId}] Stopping DingTalk providers...`);
           }
         });
       }
@@ -1069,6 +1133,10 @@ export const dingtalkPlugin = {
           stopped = true;
           if (ctx.log?.info) {
             ctx.log.info(`[${account.accountId}] DingTalk provider stopped`);
+          }
+          // Close webhook server if it was created
+          if (httpServer) {
+            closeWebhookServer(httpServer, ctx.log);
           }
         },
       };

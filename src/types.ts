@@ -30,6 +30,10 @@ export interface DingTalkConfig extends OpenClawConfig {
   messageType?: 'markdown' | 'card';
   cardTemplateId?: string;
   groups?: Record<string, { systemPrompt?: string }>;
+  // Webhook configuration for POST mode
+  webhookEnabled?: boolean;
+  webhookPort?: number;
+  webhookPath?: string;
   accounts?: Record<string, DingTalkConfig>;
 }
 
@@ -124,6 +128,7 @@ export interface DingTalkInboundMessage {
   senderNick?: string;
   chatbotUserId: string;
   sessionWebhook: string;
+  sessionWebhookExpiredTime: number;
 }
 
 /**
